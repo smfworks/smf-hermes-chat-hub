@@ -367,6 +367,50 @@
   .toast.visible { opacity: 1; pointer-events: auto; }
   .toast.error { border-color: var(--error-red); color: var(--error-red); }
   .toast.warn { border-color: var(--warn-amber); color: var(--warn-amber); }
+
+  /* Cross-channel context banner */
+  .context-banner {
+    display: none;
+    margin: 0 24px;
+    padding: 10px 16px;
+    background: rgba(210,168,255,0.08);
+    border: 1px solid rgba(210,168,255,0.2);
+    border-radius: 8px;
+    font-size: 0.8rem;
+    color: var(--dim);
+  }
+  .context-banner.visible { display: block; }
+  .context-banner strong { color: var(--accent-2); }
+  .context-banner .ctx-dismiss {
+    float: right;
+    background: none;
+    border: none;
+    color: var(--dim);
+    cursor: pointer;
+    font-size: 0.9rem;
+    padding: 0 4px;
+    line-height: 1;
+  }
+  .context-banner .ctx-dismiss:hover { color: var(--text); }
+  .context-banner .ctx-item {
+    margin: 2px 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .context-banner .ctx-item .ctx-platform {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 0.7rem;
+    margin-right: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+  .ctx-platform.telegram { background: rgba(64,159,255,0.15); color: #409fff; }
+  .ctx-platform.web { background: rgba(126,231,135,0.15); color: #7ee787; }
+  .ctx-platform.discord { background: rgba(88,101,242,0.15); color: #5865f2; }
+  .ctx-platform.cli { background: rgba(139,148,158,0.15); color: #8b949e; }
 </style>
 </head>
 <body>
@@ -397,6 +441,11 @@
     </div>
     <div style="flex:1"></div>
     <button class="back-btn" onclick="clearChat()">New Chat</button>
+  </div>
+  <div class="context-banner" id="context-banner">
+    <button class="ctx-dismiss" onclick="dismissContext()" title="Dismiss">×</button>
+    <strong>Recent across channels</strong>
+    <div id="context-items"></div>
   </div>
   <div class="chat-body" id="chat-body"></div>
   <div class="chat-input-wrap">
@@ -587,6 +636,49 @@ function openChat(agent) {
   renderChatHistory();
   document.getElementById('chat-input').value = '';
   document.getElementById('chat-input').focus();
+  // Fetch cross-channel context
+  fetchContext(agent.id);
+}
+
+function dismissContext() {
+  document.getElementById('context-banner').classList.remove('visible');
+}
+
+async function fetchContext(profile) {
+  const banner = document.getElementById('context-banner');
+  const items = document.getElementById('context-items');
+  try {
+    const res = await fetch(`${API}/context/${profile}?user=michael&minutes=120`,
+      { signal: AbortSignal.timeout(5000) });
+    const data = await res.json();
+    if (!data.messages || data.messages.length === 0) {
+      banner.classList.remove('visible');
+      return;
+    }
+    // Filter out messages from this same platform (web/hub) — only cross-channel
+    const crossChannel = data.messages.filter(m => m.platform !== 'web');
+    if (crossChannel.length === 0) {
+      banner.classList.remove('visible');
+      return;
+    }
+    items.innerHTML = crossChannel.slice(0, 5).map(m => {
+      const ts = m.timestamp ? m.timestamp.slice(11, 19) : '';
+      const platform = m.platform || 'unknown';
+      return `<div class="ctx-item">
+        <span class="ctx-platform ${platform}">${platform}</span>
+        <span>[${ts}] ${escapeHtml(m.summary || '')}</span>
+      </div>`;
+    }).join('');
+    banner.classList.add('visible');
+  } catch {
+    banner.classList.remove('visible');
+  }
+}
+
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
 }
 
 function backToGrid() {

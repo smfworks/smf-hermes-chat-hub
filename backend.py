@@ -14,6 +14,43 @@ from urllib.parse import urlparse, parse_qs
 from socketserver import ThreadingMixIn
 from pathlib import Path
 
+# ── Cross-channel bridge integration ──────────────────────────────────────
+BRIDGE_SCRIPT = str(Path.home().parent / "mikesai1" / ".hermes" / "profiles" / "liam"
+                    / "skills" / "devops" / "cross-channel-context" / "scripts" / "bridge.py")
+
+# Resolve the real home even when $HOME is overridden
+def _real_home() -> Path:
+    home = Path.home()
+    if ".hermes/profiles/" in str(home):
+        import pwd
+        try:
+            return Path(pwd.getpwuid(os.getuid()).pw_dir)
+        except (ImportError, KeyError):
+            pass
+    return home
+
+REAL_BRIDGE_SCRIPT = str(_real_home() / ".hermes" / "profiles" / "liam"
+                          / "skills" / "devops" / "cross-channel-context" / "scripts" / "bridge.py")
+
+
+def bridge_run(*args: str) -> str | None:
+    """Run bridge.py with arguments. Returns stdout on success, None on failure."""
+    try:
+        result = subprocess.run(
+            ["python3", REAL_BRIDGE_SCRIPT, *args],
+            capture_output=True, text=True, timeout=10
+        )
+        return result.stdout.strip() if result.returncode == 0 else None
+    except Exception:
+        return None
+
+
+def bridge_log(user: str, platform: str, target: str, summary: str, profile: str = "liam") -> None:
+    """Log a message to the cross-channel bridge (fire-and-forget)."""
+    bridge_run("log", "--user", user, "--platform", platform,
+               "--target", target, "--summary", summary,
+               "--profile", profile)
+
 PORT = 9099
 TIMEOUT = 180          # max seconds to wait for a response
 MAX_MESSAGE_LEN = 32000 # refuse messages longer than this
@@ -257,7 +294,7 @@ class ChatHandler(BaseHTTPRequestHandler):
         self._send_json({})
 
     def do_GET(self):
-        """Health check endpoint."""
+        """Health check and context endpoints."""
         path = urlparse(self.path).path.strip('/')
         if path == 'health':
             healthy = check_hermes_available()
@@ -273,6 +310,28 @@ class ChatHandler(BaseHTTPRequestHandler):
                 'sessions': active_profiles if healthy else {},
                 'busy': busy,
             })
+        elif path.startswith('context'):
+            # GET /context?user=michael&minutes=60
+            # OR GET /context/{profile}?user=michael&minutes=60
+            query = parse_qs(urlparse(self.path).query)
+            user = query.get('user', ['michael'])[0]
+            minutes = int(query.get('minutes', ['60'])[0])
+            lookup_path = path.split('/')
+            profile = lookup_path[1] if len(lookup_path) > 1 and lookup_path[1] != 'context' else None
+
+            args = ["lookup", "--user", user, "--minutes", str(minutes), "--count", "10"]
+            if profile:
+                args += ["--profile", profile]
+
+            result = bridge_run(*args)
+            if result:
+                try:
+                    data = json.loads(result)
+                    self._send_json(data)
+                except json.JSONDecodeError:
+                    self._send_json({'count': 0, 'messages': [], 'error': 'Bridge returned non-JSON'})
+            else:
+                self._send_json({'count': 0, 'messages': [], 'error': 'Bridge unavailable'})
         else:
             self._send_json({'error': 'Not found. Use POST /{profile} to chat.'}, 404)
 
@@ -328,7 +387,13 @@ class ChatHandler(BaseHTTPRequestHandler):
             result = run_chat(path, message, session_id)
             
             if result['error'] is None:
-                # Success!
+                # Success! Log to cross-channel bridge
+                response_preview = result['response'][:120].replace('\n', ' ')
+                bridge_log(
+                    user="michael", platform="web", target=f"hub:{path}",
+                    summary=f"Hub ({path}): {response_preview}",
+                    profile=path,
+                )
                 self._send_json({
                     'response': result['response'],
                     'session_id': result['session_id'],
